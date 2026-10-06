@@ -87,11 +87,11 @@ class SimulationEngine:
         ]
         for i in range(count):
             rid = f"R{i+1:02d}"
-            # Scatter robots initially in waiting parking bay
-            col = i % 5
-            row = i // 5
-            pos_x = 220 + col * 75
-            pos_y = 50 + row * 45
+            # Scatter robots initially in designated staging parking bays
+            col = i % 7
+            row = i // 7
+            pos_x = 215 + col * 68
+            pos_y = 64 + row * 40
             
             prio = 3
             if i == 0: prio = 5  # Emergency

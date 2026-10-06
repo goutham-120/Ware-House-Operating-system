@@ -27,7 +27,7 @@ class ResourceManager:
                     type=ResourceType.CHARGING_STATION,
                     capacity=1,  # Each physical charging bay has 1 socket
                     available_slots=1,
-                    position=ResourcePosition(x=120 + i * 160, y=420, width=110, height=70)
+                    position=ResourcePosition(x=140 + i * 190, y=410, width=150, height=110)
                 )
 
             # 2. Loading Bays (Left zone)
@@ -40,7 +40,7 @@ class ResourceManager:
                     type=ResourceType.LOADING_BAY,
                     capacity=1,  # Exclusive bay per docking robot
                     available_slots=1,
-                    position=ResourcePosition(x=40, y=100 + i * 140, width=120, height=90)
+                    position=ResourcePosition(x=40, y=140 + i * 150, width=140, height=130)
                 )
 
             # 3. Narrow Corridors (Central bottleneck)
@@ -55,7 +55,7 @@ class ResourceManager:
                     type=ResourceType.NARROW_CORRIDOR,
                     capacity=corridor_capacity,
                     available_slots=corridor_capacity,
-                    position=ResourcePosition(x=280 + i * 180, y=190, width=120, height=130)
+                    position=ResourcePosition(x=270 + i * 200, y=200, width=190, height=150)
                 )
 
             # 4. Storage Zones (Right zone)
@@ -68,7 +68,7 @@ class ResourceManager:
                     type=ResourceType.STORAGE_ZONE,
                     capacity=2,  # Multi-capacity zone
                     available_slots=2,
-                    position=ResourcePosition(x=620, y=80 + i * 140, width=140, height=100)
+                    position=ResourcePosition(x=660, y=140 + i * 150, width=180, height=140)
                 )
 
     def get_resource(self, resource_id: str) -> Optional[ResourceModel]:
