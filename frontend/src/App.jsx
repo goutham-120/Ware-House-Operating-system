@@ -58,7 +58,7 @@ export function App() {
       />
 
       {/* Main Workspace Area */}
-      <main className="flex-1 p-4 lg:p-6 max-w-7xl mx-auto w-full space-y-4">
+      <main className="flex-1 p-4 lg:p-6 max-w-[1600px] mx-auto w-full space-y-4">
         {/* Error notification if backend is offline */}
         {error && (
           <div className="p-3 bg-red-950/80 border border-red-700 rounded-lg text-red-300 text-xs flex items-center justify-between">
@@ -73,9 +73,9 @@ export function App() {
         {/* Tab 1: Live Warehouse & Monitor */}
         {activeTab === 'warehouse' && (
           <div className="space-y-4">
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
               {/* 2D Warehouse Floor */}
-              <div className="lg:col-span-7">
+              <div className="xl:col-span-7">
                 <WarehouseView
                   resources={state.resources}
                   robots={state.robots}
@@ -83,7 +83,7 @@ export function App() {
               </div>
 
               {/* Resource & Sync Primitives Live State */}
-              <div className="lg:col-span-5 flex flex-col gap-4">
+              <div className="xl:col-span-5 flex flex-col gap-4">
                 <ResourceAndSyncMonitor
                   resources={state.resources}
                   syncDetails={state.sync_details}
