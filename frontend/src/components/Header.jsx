@@ -133,7 +133,6 @@ export const Header = ({
           { id: 'comparison', label: 'Technique Comparison' },
           { id: 'analytics', label: 'Performance Analytics' },
           { id: 'events', label: 'Real-Time Event Log' },
-          { id: 'viva', label: 'OS Viva & Theory Guide' },
         ].map((tab) => (
           <button
             key={tab.id}

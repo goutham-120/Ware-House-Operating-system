@@ -164,6 +164,10 @@ export function useSimulation() {
 
   const handleSpeed = useCallback(async (speed) => {
     try {
+      setState((prev) => ({
+        ...prev,
+        config: { ...prev.config, speed },
+      }));
       await api.setSpeed(speed);
     } catch (e) {
       setError(e.message);

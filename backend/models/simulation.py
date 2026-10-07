@@ -19,6 +19,14 @@ class SimulationSpeed(str, Enum):
     NORMAL = "Normal"
     FAST = "Fast"
 
+    @classmethod
+    def _missing_(cls, value):
+        if isinstance(value, str):
+            for member in cls:
+                if member.value.lower() == value.lower():
+                    return member
+        return None
+
 class ResourceCapacityConfig(BaseModel):
     charging_stations: int = 2
     loading_bays: int = 1

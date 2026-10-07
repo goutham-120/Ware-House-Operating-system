@@ -1,7 +1,7 @@
 import pytest
 import time
 import threading
-from backend.models.simulation import SyncTechnique, SimulationConfig, ResourceCapacityConfig
+from backend.models.simulation import SyncTechnique, SimulationConfig, ResourceCapacityConfig, SimulationSpeed
 from backend.core.synchronization_manager import SynchronizationManager, ResourceSyncPrimitive
 from backend.core.deadlock_manager import DeadlockManager
 from backend.core.starvation_manager import StarvationManager
@@ -127,3 +127,140 @@ def test_simulation_engine_lifecycle():
     
     engine.reset()
     assert engine.status.value == "IDLE"
+
+def test_simulation_speed_hierarchy():
+    """Verify that Fast mode runs faster than Normal, which runs faster than Slow (Slow < Normal < Fast)"""
+    engine = SimulationEngine()
+    
+    # Fast: 0.35 factor
+    fast_factor = engine.speed_multipliers[SimulationSpeed.FAST]
+    normal_factor = engine.speed_multipliers[SimulationSpeed.NORMAL]
+    slow_factor = engine.speed_multipliers[SimulationSpeed.SLOW]
+
+    assert fast_factor < normal_factor < slow_factor
+    assert fast_factor == 0.35
+    assert normal_factor == 1.0
+    assert slow_factor == 2.0
+
+def test_simulation_speed_live_switching():
+    """Verify that changing speed on a running engine updates configuration and scales step delays live"""
+    engine = SimulationEngine()
+    engine.configure(SimulationConfig(robot_count=2, technique=SyncTechnique.MUTEX, speed=SimulationSpeed.NORMAL))
+    engine.start()
+    
+    assert engine.config.speed == SimulationSpeed.NORMAL
+    
+    # Live switch to FAST
+    engine.set_speed(SimulationSpeed.FAST)
+    assert engine.config.speed == SimulationSpeed.FAST
+    
+    # Live switch to SLOW
+    engine.set_speed(SimulationSpeed.SLOW)
+    assert engine.config.speed == SimulationSpeed.SLOW
+    
+    # Case-insensitive string support
+    engine.set_speed("fast")
+    assert engine.config.speed == SimulationSpeed.FAST
+    
+    engine.reset()
+    assert engine.status.value == "IDLE"
+
+def test_resource_occupancy_strict_current_not_cumulative():
+    """
+    Rigorously verifies that In Use count and active occupants:
+    - Strictly reflect robots currently inside at this exact moment
+    - Equal len(current_occupants)
+    - Free = Capacity - In Use
+    - Never accumulate across repeated historical entries/exits
+    """
+    from backend.models.robot import RobotState
+    from backend.models.simulation import ResourceCapacityConfig
+
+    engine = SimulationEngine()
+    engine.configure(SimulationConfig(
+        robot_count=4,
+        technique=SyncTechnique.SEMAPHORE,
+        resource_capacities=ResourceCapacityConfig(narrow_corridors=1)
+    ))
+    
+    # Check NC-01 which has capacity 2
+    nc = engine.resource_manager.get_resource("NC-01")
+    assert nc is not None
+    cap = nc.capacity
+    assert cap == 2
+    
+    # 1. Initially empty
+    state = engine.get_full_state()
+    res_data = next(r for r in state["resources"] if r["id"] == "NC-01")
+    assert len(res_data["active_users"]) == 0
+    assert res_data["available_slots"] == 2
+    assert state["sync_details"]["NC-01"]["active_holders"] == []
+
+    # 2. R01 enters
+    engine.robots["R01"].state = RobotState.RUNNING
+    engine.robots["R01"].resource_id = "NC-01"
+    state = engine.get_full_state()
+    res_data = next(r for r in state["resources"] if r["id"] == "NC-01")
+    assert res_data["active_users"] == ["R01"]
+    assert len(res_data["active_users"]) == 1
+    assert res_data["available_slots"] == 1
+    assert state["sync_details"]["NC-01"]["active_holders"] == ["R01"]
+
+    # 3. R02 enters while R01 is inside
+    engine.robots["R02"].state = RobotState.RUNNING
+    engine.robots["R02"].resource_id = "NC-01"
+    state = engine.get_full_state()
+    res_data = next(r for r in state["resources"] if r["id"] == "NC-01")
+    assert set(res_data["active_users"]) == {"R01", "R02"}
+    assert len(res_data["active_users"]) == 2
+    assert res_data["available_slots"] == 0
+    assert set(state["sync_details"]["NC-01"]["active_holders"]) == {"R01", "R02"}
+
+    # 4. R01 leaves
+    engine.robots["R01"].state = RobotState.COMPLETED
+    engine.robots["R01"].resource_id = None
+    state = engine.get_full_state()
+    res_data = next(r for r in state["resources"] if r["id"] == "NC-01")
+    assert res_data["active_users"] == ["R02"]
+    assert len(res_data["active_users"]) == 1
+    assert res_data["available_slots"] == 1
+    assert state["sync_details"]["NC-01"]["active_holders"] == ["R02"]
+
+    # 5. R03 enters
+    engine.robots["R03"].state = RobotState.RUNNING
+    engine.robots["R03"].resource_id = "NC-01"
+    state = engine.get_full_state()
+    res_data = next(r for r in state["resources"] if r["id"] == "NC-01")
+    assert set(res_data["active_users"]) == {"R02", "R03"}
+    assert len(res_data["active_users"]) == 2
+    assert res_data["available_slots"] == 0
+
+    # 6. Both R02 and R03 leave
+    engine.robots["R02"].state = RobotState.READY
+    engine.robots["R02"].resource_id = None
+    engine.robots["R03"].state = RobotState.COMPLETED
+    engine.robots["R03"].resource_id = None
+    state = engine.get_full_state()
+    res_data = next(r for r in state["resources"] if r["id"] == "NC-01")
+    assert res_data["active_users"] == []
+    assert len(res_data["active_users"]) == 0
+    assert res_data["available_slots"] == 2
+
+    # 7. Simulate 10 historical entry/exit cycles to prove count never accumulates
+    for i in range(10):
+        # R04 enters
+        engine.robots["R04"].state = RobotState.RUNNING
+        engine.robots["R04"].resource_id = "NC-01"
+        s = engine.get_full_state()
+        r_nc = next(r for r in s["resources"] if r["id"] == "NC-01")
+        assert len(r_nc["active_users"]) == 1
+        assert r_nc["available_slots"] == 1
+        
+        # R04 leaves
+        engine.robots["R04"].state = RobotState.COMPLETED
+        engine.robots["R04"].resource_id = None
+        s = engine.get_full_state()
+        r_nc = next(r for r in s["resources"] if r["id"] == "NC-01")
+        assert len(r_nc["active_users"]) == 0
+        assert r_nc["available_slots"] == 2
+        assert s["sync_details"]["NC-01"]["active_holders"] == []

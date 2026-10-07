@@ -2,7 +2,7 @@ import threading
 import time
 import random
 import uuid
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Union
 from datetime import datetime
 
 from backend.models.robot import RobotModel, RobotState, Position
@@ -60,11 +60,13 @@ class SimulationEngine:
         # Listeners / callbacks (e.g. WebSocket broadcaster)
         self.on_state_change: Optional[Callable[[], None]] = None
 
-        # Speed scaling factors
         self.speed_multipliers = {
-            SimulationSpeed.SLOW: 2.0,     # Slower duration
-            SimulationSpeed.NORMAL: 1.0,   # Baseline
-            SimulationSpeed.FAST: 0.35     # Fast execution
+            SimulationSpeed.SLOW: 2.0,     # Slower duration (2.0x delay = 0.5x speed)
+            SimulationSpeed.NORMAL: 1.0,   # Baseline (1.0x delay = 1.0x speed)
+            SimulationSpeed.FAST: 0.35,    # Fast execution (0.35x delay = ~2.86x speed)
+            "Slow": 2.0,
+            "Normal": 1.0,
+            "Fast": 0.35,
         }
 
         # Initialize default resources
@@ -111,8 +113,7 @@ class SimulationEngine:
 
     def configure(self, new_config: SimulationConfig):
         with self.lock:
-            if self.status == SimulationStatus.RUNNING:
-                self._stop_threads()
+            self._stop_threads()
 
             self.config = new_config
             self.resource_manager.initialize_resources(new_config.resource_capacities)
@@ -134,6 +135,7 @@ class SimulationEngine:
             if self.status == SimulationStatus.RUNNING:
                 return
 
+            self._stop_threads()
             self.status = SimulationStatus.RUNNING
             self.pause_event.set()
             self.watchdog_stop.clear()
@@ -184,10 +186,16 @@ class SimulationEngine:
             self.status = SimulationStatus.IDLE
             self.log_event(EventType.SYSTEM_INFO, message="Simulation RESET to initial state")
 
-    def set_speed(self, speed: SimulationSpeed):
+    def set_speed(self, speed: Union[SimulationSpeed, str]):
         with self.lock:
+            if isinstance(speed, str) and not isinstance(speed, SimulationSpeed):
+                try:
+                    speed = SimulationSpeed(speed)
+                except ValueError:
+                    speed = SimulationSpeed.NORMAL
             self.config.speed = speed
-            self.log_event(EventType.SYSTEM_INFO, message=f"Simulation speed set to {speed.value}")
+            speed_val = speed.value if hasattr(speed, "value") else str(speed)
+            self.log_event(EventType.SYSTEM_INFO, message=f"Simulation speed set to {speed_val}")
 
     def _stop_threads(self):
         self.watchdog_stop.set()
@@ -201,6 +209,13 @@ class SimulationEngine:
             if primitive:
                 with primitive.state_lock:
                     primitive.condition.notify_all()
+
+        threads = list(self.robot_threads.values())
+        if self.watchdog_thread and self.watchdog_thread.is_alive():
+            threads.append(self.watchdog_thread)
+        for t in threads:
+            if t.is_alive() and t != threading.current_thread():
+                t.join(timeout=0.08)
 
         self.robot_threads.clear()
         self.stop_events.clear()
@@ -244,13 +259,12 @@ class SimulationEngine:
             if stop_event.is_set():
                 break
 
-            speed_factor = self.speed_multipliers.get(self.config.speed, 1.0)
-
             # 1. GENERATE TASK (Process enters READY)
+            base_duration = random.uniform(2.5, 4.0)
             task = self.task_manager.generate_task_for_robot(
                 robot_id=robot_id,
                 allowed_tasks=self.config.selected_tasks,
-                duration=random.uniform(2.5, 4.5) * speed_factor
+                duration=base_duration
             )
 
             with self.lock:
@@ -258,6 +272,9 @@ class SimulationEngine:
                 if not robot:
                     break
                 robot.state = RobotState.READY
+                robot.resource_id = None
+                robot.waiting_for_resource = None
+                robot.in_critical_section = False
                 robot.task_id = task.id
                 robot.task_type = task.type.value
                 robot.task_progress = 0.0
@@ -266,7 +283,7 @@ class SimulationEngine:
             # Choose candidate resource matching required type
             target_res = self._find_candidate_resource(task.required_resource_type, task.required_resource_id)
             if not target_res:
-                time.sleep(0.5 * speed_factor)
+                self._idle_with_speed(0.4, stop_event)
                 continue
 
             target_res_id = target_res.id
@@ -306,6 +323,13 @@ class SimulationEngine:
 
             if stop_event.is_set():
                 self.sync_manager.release_resource(target_res_id, robot_id)
+                self.resource_manager.record_leave(target_res_id, robot_id)
+                self.deadlock_manager.record_release(robot_id, target_res_id)
+                with self.lock:
+                    r_exit = self.robots.get(robot_id)
+                    if r_exit:
+                        r_exit.resource_id = None
+                        r_exit.in_critical_section = False
                 break
 
             wait_duration = time.time() - start_wait_time
@@ -349,14 +373,15 @@ class SimulationEngine:
 
             # EXECUTE IN CRITICAL SECTION (Simulation of work)
             steps = 20
-            step_sleep = (task.duration / steps)
+            base_step_delay = base_duration / steps
             exec_start = time.time()
 
             for step in range(steps):
                 if stop_event.is_set():
                     break
                 self.pause_event.wait()
-                time.sleep(step_sleep)
+                current_speed_factor = self.speed_multipliers.get(self.config.speed, 1.0)
+                time.sleep(base_step_delay * current_speed_factor)
                 prog = round(((step + 1) / steps) * 100.0, 1)
                 with self.lock:
                     if robot_id in self.robots:
@@ -399,13 +424,23 @@ class SimulationEngine:
             )
 
             # Brief idle before next cycle
-            time.sleep(random.uniform(0.5, 1.2) * speed_factor)
+            self._idle_with_speed(random.uniform(0.4, 0.8), stop_event)
+
+    def _idle_with_speed(self, base_duration: float, stop_event: threading.Event):
+        """Idle delay that dynamically adapts to live speed changes, pause, and stop events."""
+        accumulated = 0.0
+        while accumulated < base_duration and not stop_event.is_set():
+            self.pause_event.wait()
+            if stop_event.is_set():
+                break
+            current_factor = self.speed_multipliers.get(self.config.speed, 1.0)
+            chunk = min(0.05, max(0.005, (base_duration - accumulated) * current_factor))
+            time.sleep(chunk)
+            accumulated += chunk / max(0.01, current_factor)
 
     def _move_robot_towards(self, robot_id: str, target_x: float, target_y: float, stop_event: threading.Event):
         """Smoothly interpolates robot position towards target"""
         steps = 10
-        speed_factor = self.speed_multipliers.get(self.config.speed, 1.0)
-        step_delay = (0.2 * speed_factor) / steps
 
         with self.lock:
             robot = self.robots.get(robot_id)
@@ -418,12 +453,15 @@ class SimulationEngine:
         for s in range(1, steps + 1):
             if stop_event.is_set():
                 break
+            self.pause_event.wait()
             alpha = s / steps
             with self.lock:
                 robot = self.robots.get(robot_id)
                 if robot:
                     robot.position.x = start_x + (target_x + 15 - start_x) * alpha
                     robot.position.y = start_y + (target_y + 15 - start_y) * alpha
+            current_factor = self.speed_multipliers.get(self.config.speed, 1.0)
+            step_delay = (0.2 * current_factor) / steps
             time.sleep(step_delay)
 
     def _find_candidate_resource(self, res_type: str, forced_res_id: Optional[str] = None) -> Optional[ResourceModel]:
@@ -615,6 +653,8 @@ class SimulationEngine:
             if beneficiary and beneficiary in self.robots:
                 self.robots[beneficiary].state = RobotState.RUNNING
                 self.robots[beneficiary].waiting_for_resource = None
+                self.robots[beneficiary].resource_id = preempt_res
+                self.robots[beneficiary].in_critical_section = True
                 self.resource_manager.remove_from_waiting(preempt_res, beneficiary)
                 self.resource_manager.record_enter(preempt_res, beneficiary)
                 self.deadlock_manager.record_allocation(beneficiary, preempt_res)
@@ -664,6 +704,36 @@ class SimulationEngine:
     # -------------------------------------------------------------
     def get_full_state(self) -> Dict[str, Any]:
         with self.lock:
+            # Reconcile resource occupancy directly against current robot states.
+            # Current occupants strictly represent robots occupying that resource at this exact moment.
+            for res in self.resource_manager.resources.values():
+                occupants = [
+                    r.id for r in self.robots.values()
+                    if r.resource_id == res.id and r.state in (RobotState.RUNNING, RobotState.BLOCKED)
+                ]
+                occupants_dedup = list(dict.fromkeys(occupants))
+                res.active_users = occupants_dedup
+                res.available_slots = max(0, res.capacity - len(occupants_dedup))
+                if len(occupants_dedup) == 0:
+                    res.status = ResourceStatus.FREE
+                elif len(occupants_dedup) > res.capacity:
+                    res.status = ResourceStatus.CONFLICT
+                elif len(occupants_dedup) == res.capacity:
+                    res.status = ResourceStatus.FULL
+                else:
+                    res.status = ResourceStatus.OCCUPIED
+
+                waiters = [
+                    r.id for r in self.robots.values()
+                    if r.waiting_for_resource == res.id and r.state in (RobotState.WAITING, RobotState.BLOCKED)
+                ]
+                res.waiting_queue = list(dict.fromkeys(waiters))
+
+                prim = self.sync_manager.get_primitive(res.id)
+                if prim:
+                    with prim.state_lock:
+                        prim.active_holders = list(occupants_dedup)
+
             robots_list = [r.model_dump() for r in self.robots.values()]
             resources_list = [r.model_dump() for r in self.resource_manager.get_all_resources()]
             tasks_list = [t.model_dump() for t in self.task_manager.get_all_tasks()[-20:]]
@@ -678,10 +748,13 @@ class SimulationEngine:
             sync_details = {}
             for res_id in self.resource_manager.get_resource_capacities_dict().keys():
                 prim = self.sync_manager.get_primitive(res_id)
+                res_obj = self.resource_manager.get_resource(res_id)
+                cur_holders = res_obj.active_users if res_obj else []
+                cur_waiters = res_obj.waiting_queue if res_obj else []
                 if prim:
                     sync_details[res_id] = {
-                        "active_holders": prim.get_active_holders(),
-                        "waiters": prim.get_waiting_robot_ids(),
+                        "active_holders": list(cur_holders),
+                        "waiters": list(cur_waiters),
                         "capacity": prim.capacity,
                         "conflict_count": prim.conflict_count
                     }

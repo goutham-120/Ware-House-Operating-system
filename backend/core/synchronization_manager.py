@@ -41,6 +41,8 @@ class ResourceSyncPrimitive:
             self.technique = new_technique
             self.capacity = new_capacity
             self.raw_semaphore = threading.Semaphore(new_capacity)
+            self.active_holders.clear()
+            self.waiters.clear()
 
     def acquire(self, robot_id: str, priority: int, timeout: Optional[float] = None) -> Tuple[bool, Optional[str]]:
         """
@@ -56,7 +58,8 @@ class ResourceSyncPrimitive:
             time.sleep(0.01)
             
             with self.state_lock:
-                self.active_holders.append(robot_id)
+                if robot_id not in self.active_holders:
+                    self.active_holders.append(robot_id)
                 # Check for capacity breach (Race Condition / Conflict)
                 if len(self.active_holders) > self.capacity:
                     self.conflict_count += 1
@@ -77,10 +80,12 @@ class ResourceSyncPrimitive:
             with self.state_lock:
                 if len(self.active_holders) == 0:
                     # Immediate acquisition
-                    self.active_holders.append(robot_id)
+                    if robot_id not in self.active_holders:
+                        self.active_holders.append(robot_id)
                     return True, None
                 
                 # Must wait - insert in priority order (higher priority first, earlier time for ties)
+                self.waiters = [w for w in self.waiters if w.robot_id != robot_id]
                 self.waiters.append(waiter_item)
                 self._sort_waiters()
 
@@ -106,9 +111,11 @@ class ResourceSyncPrimitive:
             waiter_item = PriorityWaitingItem(robot_id, priority, req_time, self.condition)
             with self.state_lock:
                 if len(self.active_holders) < self.capacity:
-                    self.active_holders.append(robot_id)
+                    if robot_id not in self.active_holders:
+                        self.active_holders.append(robot_id)
                     return True, None
                 
+                self.waiters = [w for w in self.waiters if w.robot_id != robot_id]
                 self.waiters.append(waiter_item)
                 self._sort_waiters()
 
@@ -134,9 +141,11 @@ class ResourceSyncPrimitive:
                 if len(self.active_holders) < self.capacity:
                     # Acquire internal mutex to serialize slot allocation
                     with self.mutex:
-                        self.active_holders.append(robot_id)
+                        if robot_id not in self.active_holders:
+                            self.active_holders.append(robot_id)
                     return True, None
                 
+                self.waiters = [w for w in self.waiters if w.robot_id != robot_id]
                 self.waiters.append(waiter_item)
                 self._sort_waiters()
 
@@ -161,8 +170,7 @@ class ResourceSyncPrimitive:
         Release the resource and wake up the next highest-priority waiting process.
         """
         with self.state_lock:
-            if robot_id in self.active_holders:
-                self.active_holders.remove(robot_id)
+            self.active_holders = [h for h in self.active_holders if h != robot_id]
 
             if self.technique == SyncTechnique.NO_SYNCHRONIZATION:
                 return
@@ -173,7 +181,8 @@ class ResourceSyncPrimitive:
             while slots_available > 0 and self.waiters:
                 next_waiter = self.waiters.pop(0)
                 next_waiter.granted = True
-                self.active_holders.append(next_waiter.robot_id)
+                if next_waiter.robot_id not in self.active_holders:
+                    self.active_holders.append(next_waiter.robot_id)
                 slots_available -= 1
 
             self.condition.notify_all()
@@ -202,11 +211,11 @@ class ResourceSyncPrimitive:
 
     def get_waiting_robot_ids(self) -> List[str]:
         with self.state_lock:
-            return [w.robot_id for w in self.waiters]
+            return list(dict.fromkeys(w.robot_id for w in self.waiters))
 
     def get_active_holders(self) -> List[str]:
         with self.state_lock:
-            return list(self.active_holders)
+            return list(dict.fromkeys(self.active_holders))
 
 
 class SynchronizationManager:

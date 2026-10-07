@@ -9,7 +9,6 @@ import { DemonstrationMode } from './components/DemonstrationMode';
 import { TechniqueComparison } from './components/TechniqueComparison';
 import { PerformanceAnalytics } from './components/PerformanceAnalytics';
 import { EventLog } from './components/EventLog';
-import { VivaGuide } from './components/VivaGuide';
 import { SimulationConfigModal } from './components/SimulationConfigModal';
 import * as api from './services/api';
 
@@ -125,11 +124,6 @@ export function App() {
         {/* Tab 5: Real-Time Event Log */}
         {activeTab === 'events' && (
           <EventLog events={state.events} />
-        )}
-
-        {/* Tab 6: OS Viva Guide */}
-        {activeTab === 'viva' && (
-          <VivaGuide />
         )}
       </main>
 

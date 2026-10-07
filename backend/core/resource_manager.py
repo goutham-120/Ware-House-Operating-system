@@ -90,8 +90,7 @@ class ResourceManager:
                 return
             if robot_id not in res.active_users:
                 res.active_users.append(robot_id)
-            if robot_id in res.waiting_queue:
-                res.waiting_queue.remove(robot_id)
+            res.waiting_queue = [w for w in res.waiting_queue if w != robot_id]
             
             res.available_slots = max(0, res.capacity - len(res.active_users))
             res.total_allocations += 1
@@ -109,8 +108,7 @@ class ResourceManager:
             res = self.resources.get(resource_id)
             if not res:
                 return
-            if robot_id in res.active_users:
-                res.active_users.remove(robot_id)
+            res.active_users = [u for u in res.active_users if u != robot_id]
             res.total_usage_time += usage_duration
             res.available_slots = max(0, res.capacity - len(res.active_users))
 
@@ -132,8 +130,8 @@ class ResourceManager:
     def remove_from_waiting(self, resource_id: str, robot_id: str):
         with self.lock:
             res = self.resources.get(resource_id)
-            if res and robot_id in res.waiting_queue:
-                res.waiting_queue.remove(robot_id)
+            if res:
+                res.waiting_queue = [w for w in res.waiting_queue if w != robot_id]
 
     def get_resource_capacities_dict(self) -> Dict[str, int]:
         with self.lock:
